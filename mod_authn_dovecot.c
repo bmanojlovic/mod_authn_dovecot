@@ -30,7 +30,7 @@
 
 #include "apr_base64.h"		// base64 encode
 
-// Communication...
+// What has been implemented
 /*
 "S:" = What dovecot-auth is writing...
 "C:" = What we should write for succesfull auth...
@@ -78,17 +78,17 @@ struct connection_state {
 };
 
 /* proto */
-int sock_readline(apr_pool_t * p, int sock, char *data);
-int receive_data(apr_pool_t * p, struct connection_state *cs, char *data);
-int send_handshake(apr_pool_t * p, int sock);
-int send_data(apr_pool_t * p, int sock, const char *user, const char *pass);
+int sock_readline(apr_pool_t * p, request_rec * r, int sock, char *data);
+int receive_data(apr_pool_t * p, request_rec * r, struct connection_state *cs, char *data);
+int send_handshake(apr_pool_t * p, request_rec * r, int sock);
+int send_auth_request(apr_pool_t * p, request_rec * r, int sock, const char *user, const char *pass, char *remotehost);
 
 static void *create_authn_dovecot_dir_config(apr_pool_t * p, char *d)
 {
-	authn_dovecot_config_rec *conf = apr_palloc(p, sizeof(*conf));
+	authn_dovecot_config_rec *conf = apr_pcalloc(p, sizeof(*conf));
 
 	conf->dovecotauthsocket = "/var/run/dovecot/auth-client";	/* just to illustrate the default really */
-	conf->authoritative = 1;
+	conf->authoritative = 1;	// by default we are authoritative
 	return conf;
 }
 
@@ -108,30 +108,11 @@ static const command_rec authn_dovecot_cmds[] = {
 
 module AP_MODULE_DECLARE_DATA authn_dovecot_module;
 
-/*
-"S:" = What dovecot-auth is writing...
-"C:" = What we should write for succesfull auth...
-
-S:MECH <TAB> PLAIN <TAB> plaintext <NEWLINE>
-S:MECH <TAB> LOGIN <TAB> plaintext <NEWLINE>
-S:VERSION <TAB> 1 <TAB> 0 <NEWLINE>
-S:SPID <TAB> 3924 <NEWLINE>
-S:CUID <TAB> 3032 <NEWLINE>
-S:DONE <NEWLINE>
-
-C:VERSION <TAB> 1 <TAB> 0 <NEWLINE>
-C:CPID <TAB> 17433 <NEWLINE>
-C:AUTH <TAB> 1 <TAB> PLAIN <TAB> service=apache <TAB> nologin <TAB> lip=127.0.0.1 <TAB> rip=10.10.10.1 <TAB> secured <TAB> resp=AGpvaG5kb2UAcGFzc3dvcmQ== <NEWLINE>
-
-# on successs this should be output
-S:OK <TAB> 1 <TAB> user=johndoe  <NEWLINE>
-*/
-
 static authn_status check_password(request_rec * r, const char *user, const char *password)
 {
 	authn_dovecot_config_rec *conf = ap_get_module_config(r->per_dir_config,
 							      &authn_dovecot_module);
-	apr_pool_t *p;		// sub pool
+	apr_pool_t *p;		// sub pool of r->pool
 
 	int i, auths, readsocks, result, opts, fdmax, cnt, auth_in_progress, retval;
 	struct sockaddr_un address;
@@ -149,8 +130,7 @@ static authn_status check_password(request_rec * r, const char *user, const char
 	fd_set socks_r;
 	fd_set socks_w;
 	fd_set error_fd;
-	//char *line = malloc(sizeof(char) * (BUFFMAX + 1));
-	char *line = apr_palloc(p, sizeof(char) * (BUFFMAX + 1));
+	char *line = apr_pcalloc(p, sizeof(char) * (BUFFMAX + 1));
 	auths = socket(AF_UNIX, SOCK_STREAM, 0);
 	opts = fcntl(auths, F_GETFL);
 	opts = (opts | O_NONBLOCK);
@@ -161,8 +141,12 @@ static authn_status check_password(request_rec * r, const char *user, const char
 	strncpy(address.sun_path, conf->dovecotauthsocket, strlen(conf->dovecotauthsocket));
 	result = connect(auths, (struct sockaddr *)&address, sizeof address);
 	if (result) {
-		perror("Connect failed");
-		exit(-1);
+		ap_log_rerror(APLOG_MARK, APLOG_ERR, 0, r, "Dovecot Authentication: could not connect to dovecot socket");
+		if (conf->authoritative == 0) {
+			return DECLINED;
+		} else {
+			return AUTH_USER_NOT_FOUND;
+		}
 	}
 	cnt = 0;
 
@@ -184,8 +168,8 @@ static authn_status check_password(request_rec * r, const char *user, const char
 
 		readsocks = select(fdmax + 1, &socks_r, &socks_w, NULL, &tv);
 		if (readsocks < 0) {
-			perror("select");
-			exit(-1);
+			ap_log_rerror(APLOG_MARK, APLOG_ERR, 0, r, "Dovecot Authentication: socket select");
+			return DECLINED;
 		}
 
 		if (readsocks == 0) {
@@ -197,59 +181,68 @@ static authn_status check_password(request_rec * r, const char *user, const char
 			for (i = 0; i <= fdmax; i++) {
 				if (FD_ISSET(i, &socks_w)) {
 					if (cs.handshake_sent == 0) {
-						cs.handshake_sent = send_handshake(p, i);
-						fprintf(stderr, "handshake_sent=%i\n", cs.handshake_sent);
+						cs.handshake_sent = send_handshake(p, r, i);
+						ap_log_rerror(APLOG_MARK, APLOG_DEBUG, 0, r, "handshake_sent=%i", cs.handshake_sent);
 					}
 				}
 				if (FD_ISSET(i, &socks_r)) {
-					while ((retval = sock_readline(p, i, line)) > 0) {
-						if (!receive_data(p, &cs, line)) {
-							fprintf(stderr, "Recive data problems\n");
-							break;
+					while ((retval = sock_readline(p, r, i, line)) > 0) {
+						if (!receive_data(p, r, &cs, line)) {
+							ap_log_rerror(APLOG_MARK, APLOG_DEBUG, 0, r, "Recive data problems");
+							if (conf->authoritative == 0) {
+								return DECLINED;
+							} else {
+								return AUTH_USER_NOT_FOUND;
+							}
 						} else {
 							if (cs.hshake_done == 1) {
 								if (!cs.version_ok && !cs.mech_available) {
-									fprintf(stderr,
-										"No authentication possible protocol version wrong or plaintext method not available...\n");
+									ap_log_rerror(APLOG_MARK, APLOG_ERR, 0, r,
+										      "No authentication possible protocol version wrong or plaintext method not available...");
 									close(auths);
 									return AUTH_USER_NOT_FOUND;
 								} else {
 									if (auth_in_progress != 1) {
-										fprintf(stderr, "Sending auth\n");
-										send_data(p, i, user, password);
+										ap_log_rerror(APLOG_MARK, APLOG_DEBUG, 0, r, "Sending auth");
+										send_auth_request(p, r, i, user, password, r->connection->remote_ip);
 										auth_in_progress = 1;
 									}
 								}
 							}
 							if (cs.authenticated == 1) {
-								fprintf(stderr, "I am authenticated!!!\n");
+								ap_log_rerror(APLOG_MARK, APLOG_DEBUG, 0, r, "Authenticated by dovecot user=%s", user);
 								close(auths);
 								return AUTH_GRANTED;
 							}
 							if (cs.authenticated == -1) {
-								fprintf(stderr, "NO ACCESS!!!\n");
+								ap_log_rerror(APLOG_MARK, APLOG_ERR, 0, r, "Denied authentication by dovecot user=%s", user);
 								close(auths);
-								return AUTH_USER_NOT_FOUND;
+								if (conf->authoritative == 0) {
+									return DECLINED;
+								} else {
+									return AUTH_USER_NOT_FOUND;
+								}
 							}
 							break;
 						}
 					}
 					//if (retval == -1) {
-					//	fprintf(stderr, "sock_readline returned -1...\n");
-					//	close(auths);
-					//	return DECLINED;
+					//      fprintf(stderr, "sock_readline returned -1...\n");
+					//      close(auths);
+					//      return DECLINED;
 					//}
 				}
 			}
 		}
 	}
-
-	close(auths);
-	printf("\n");
-	exit(0);
+	if (conf->authoritative == 0) {
+		return DECLINED;
+	} else {
+		return AUTH_USER_NOT_FOUND;
+	}
 }
 
-int sock_readline(apr_pool_t * p, int sock, char *data)
+int sock_readline(apr_pool_t * p, request_rec * r, int sock, char *data)
 {
 	int i = 0;
 	char c;
@@ -268,15 +261,10 @@ int sock_readline(apr_pool_t * p, int sock, char *data)
 	return i;
 }
 
-int send_handshake(apr_pool_t * p, int sock)
+int send_handshake(apr_pool_t * p, request_rec * r, int sock)
 {
-      char handshake_data[100];
-      memset(handshake_data, 0x0, sizeof(char) * (100));
-// 	char *handshake_data = apr_palloc(p, 100);
-	snprintf(handshake_data,
-		 sizeof(handshake_data),
-		 "VERSION\t%u\t%u\n"
-		 "CPID\t%u\n", AUTH_PROTOCOL_MAJOR_VERSION, AUTH_PROTOCOL_MINOR_VERSION, (unsigned int)getpid());
+	char *handshake_data = apr_pcalloc(p, 100);
+	handshake_data = apr_psprintf(p, "VERSION\t%u\t%u\n" "CPID\t%u\n", AUTH_PROTOCOL_MAJOR_VERSION, AUTH_PROTOCOL_MINOR_VERSION, (unsigned int)getpid());
 	if (send(sock, handshake_data, strlen(handshake_data), 0) > 0) {
 		return 1;
 	} else {
@@ -284,36 +272,30 @@ int send_handshake(apr_pool_t * p, int sock)
 	}
 }
 
-int receive_data(apr_pool_t * p, struct connection_state *cs, char *data)
+int receive_data(apr_pool_t * p, request_rec * r, struct connection_state *cs, char *data)
 {
 	int ver_major;
 	int ver_minor;
 	char *auth_method;
 	char *auth_protocol;
-	//cs->hshake_done = 1;
 	if (strncmp("MECH", data, 4) == 0) {
 		strtok(data, "\t");
 		auth_method = strtok(NULL, "\t");
 		auth_protocol = strtok(NULL, "\t");
-//              printf("auth_method=\%s\n", auth_method);
-//              printf("auth_protocol=\%s\n", auth_protocol);
 		if (strncasecmp("PLAINTEXT", auth_protocol, 9) == 0) {
 			if (strncasecmp(AUTH_MECHANISM, auth_method, strlen(AUTH_MECHANISM)) == 0) {
 				cs->mech_available = 1;
 			}
 		}
-//              printf("is auth mechanism available...:");
-//              printf("%i\n",cs->mech_available);
 	}
 
 	if (strncmp("VERSION", data, 7) == 0) {
-//              printf("Version check...:");
 		if (sscanf(&data[8], "%u\t%u\n", &ver_major, &ver_minor) != 2) {
 			perror("sscanf failed version impossible to read");
+			ap_log_rerror(APLOG_MARK, APLOG_DEBUG, 0, r, "Dovecot Authentication: sscanf failed on reading version");
 		}
 		if (ver_major == AUTH_PROTOCOL_MAJOR_VERSION)
 			cs->version_ok = 1;
-//              printf("%i\n",cs->version_ok);
 	}
 	if (strncmp("DONE", data, 4) == 0) {
 		cs->hshake_done = 1;
@@ -326,40 +308,32 @@ int receive_data(apr_pool_t * p, struct connection_state *cs, char *data)
 
 	if (strncmp("OK", data, 2) == 0) {
 		cs->authenticated = 1;
-		//exit(-1);
 		return 1;
 	}
 	return 1;
 }
 
-int send_data(apr_pool_t * p, int sock, const char *user, const char *pass)
+int send_auth_request(apr_pool_t * p, request_rec * r, int sock, const char *user, const char *pass, char *remotehost)
 {
 	char data[BUFFMAX];
-	char *user_pass, *encoded_user_pass;
+	char *encoded_user_pass;
 	int up_size;
 
 	up_size = strlen(user) + strlen(pass);
 	if (up_size > BUFFMAX - 1024) {
-		fprintf(stderr, "User and pass length is over BUFFMAX=%i which is NOT allowed size=%i\n",
-			BUFFMAX, up_size);
+		ap_log_rerror(APLOG_MARK, APLOG_ERR, 0, r, "User and pass length is over BUFFMAX=%i which is NOT allowed size=%i\n", BUFFMAX, up_size);
 		return 0;
 	}
-	//user_pass = apr_palloc(p, up_size + 2);
-	user_pass = malloc(up_size + 2);
-	memset(user_pass,0x0,up_size + 2); // +2 is for \0
-	// i tried to use stupid apr_pstrcat
+	char *user_pass = apr_pcalloc(p, up_size + 2);
 	strcat(&user_pass[1], user);
 	strcat(&user_pass[1 + strlen(user) + 1], pass);
-	encoded_user_pass = (char *)apr_palloc(p, apr_base64_encode_len(sizeof(user_pass) + 2));
+	encoded_user_pass = (char *)apr_pcalloc(p, apr_base64_encode_len(sizeof(user_pass) + 2));
 	apr_base64_encode(encoded_user_pass, user_pass, up_size + 2);
-	snprintf(data, BUFFMAX,
-		 "AUTH\t1\tPLAIN\tservice=apache\tnologin"
-		 "\tlip=127.0.0.1\trip=10.10.10.1\tsecured\tresp=%s\n", encoded_user_pass);
+	snprintf(data, BUFFMAX, "AUTH\t1\tPLAIN\tservice=apache\tnologin"	// local ip (lip) is hardcoded as we are
+		 "\tlip=127.0.0.1\trip=%s\tsecured\tresp=%s\n", remotehost, encoded_user_pass);	// connecting trough LOCAL unix socket anyway :)
 	if (send(sock, data, strlen(data), 0) > 0) {
-		free(user_pass);
 		return 1;
 	} else {
-		free(user_pass);
 		return 0;
 	}
 }
