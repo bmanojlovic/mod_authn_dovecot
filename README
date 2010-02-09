@@ -1,0 +1,33 @@
+Hello,
+
+	as dovecot can have many different backends and exposes itself as
+ authentication source trough dovecot-auth client socket which example
+ configuration can be found bellow
+
+################################################################################
+  socket listen {
+    #master {
+      # Master socket provides access to userdb information. It's typically
+      # used to give Dovecot's local delivery agent access to userdb so it
+      # can find mailbox locations.
+      #path = /var/run/dovecot/auth-master
+      #mode = 0600
+      # Default user/group is the one who started dovecot-auth (root)
+      #user =
+      #group =
+    #}
+    client {
+      # The client socket is generally safe to export to everyone. Typical
+      # use
+      # is to export it to your SMTP server so it can do SMTP AUTH lookups
+      # using it.
+      path = /var/run/dovecot/auth-client
+      mode = 0666
+    }
+  }
+################################################################################
+
+Example configuration of apache2 server can be found in "example.conf" file
+in same directory. Currently there is possibility to chain it with other
+authentication mechanisms but that will/ should be discussed anyway.
+
