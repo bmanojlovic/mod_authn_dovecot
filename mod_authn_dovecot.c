@@ -182,13 +182,13 @@ static authn_status check_password(request_rec * r, const char *user, const char
 				if (FD_ISSET(i, &socks_w)) {
 					if (cs.handshake_sent == 0) {
 						cs.handshake_sent = send_handshake(p, r, i);
-						ap_log_rerror(APLOG_MARK, APLOG_DEBUG, 0, r, "handshake_sent=%i", cs.handshake_sent);
+						ap_log_rerror(APLOG_MARK, APLOG_DEBUG, 0, r, "Dovecot Authentication: handshake is sent");
 					}
 				}
 				if (FD_ISSET(i, &socks_r)) {
 					while ((retval = sock_readline(p, r, i, line)) > 0) {
 						if (!receive_data(p, r, &cs, line)) {
-							ap_log_rerror(APLOG_MARK, APLOG_DEBUG, 0, r, "Recive data problems");
+							ap_log_rerror(APLOG_MARK, APLOG_DEBUG, 0, r, "Dovecot Authentication: problems while receiving data from socket");
 							if (conf->authoritative == 0) {
 								return DECLINED;
 							} else {
@@ -198,24 +198,24 @@ static authn_status check_password(request_rec * r, const char *user, const char
 							if (cs.hshake_done == 1) {
 								if (!cs.version_ok && !cs.mech_available) {
 									ap_log_rerror(APLOG_MARK, APLOG_ERR, 0, r,
-										      "No authentication possible protocol version wrong or plaintext method not available...");
+										      "Dovecot Authentication: No authentication possible protocol version wrong or plaintext method not available...");
 									close(auths);
 									return AUTH_USER_NOT_FOUND;
 								} else {
 									if (auth_in_progress != 1) {
-										ap_log_rerror(APLOG_MARK, APLOG_DEBUG, 0, r, "Sending auth");
+										ap_log_rerror(APLOG_MARK, APLOG_DEBUG, 0, r, "Dovecot Authentication: Sending authentication request");
 										send_auth_request(p, r, i, user, password, r->connection->remote_ip);
 										auth_in_progress = 1;
 									}
 								}
 							}
 							if (cs.authenticated == 1) {
-								ap_log_rerror(APLOG_MARK, APLOG_DEBUG, 0, r, "Authenticated by dovecot user=%s", user);
+								ap_log_rerror(APLOG_MARK, APLOG_DEBUG, 0, r, "Dovecot Authentication: Authenticated user=%s", user);
 								close(auths);
 								return AUTH_GRANTED;
 							}
 							if (cs.authenticated == -1) {
-								ap_log_rerror(APLOG_MARK, APLOG_ERR, 0, r, "Denied authentication by dovecot user=%s", user);
+								ap_log_rerror(APLOG_MARK, APLOG_ERR, 0, r, "Dovecot Authentication: Denied authentication for user=%s", user);
 								close(auths);
 								if (conf->authoritative == 0) {
 									return DECLINED;
@@ -291,7 +291,6 @@ int receive_data(apr_pool_t * p, request_rec * r, struct connection_state *cs, c
 
 	if (strncmp("VERSION", data, 7) == 0) {
 		if (sscanf(&data[8], "%u\t%u\n", &ver_major, &ver_minor) != 2) {
-			perror("sscanf failed version impossible to read");
 			ap_log_rerror(APLOG_MARK, APLOG_DEBUG, 0, r, "Dovecot Authentication: sscanf failed on reading version");
 		}
 		if (ver_major == AUTH_PROTOCOL_MAJOR_VERSION)
@@ -315,22 +314,31 @@ int receive_data(apr_pool_t * p, request_rec * r, struct connection_state *cs, c
 
 int send_auth_request(apr_pool_t * p, request_rec * r, int sock, const char *user, const char *pass, char *remotehost)
 {
-	char data[BUFFMAX];
-	char *encoded_user_pass;
+	char *data=apr_pcalloc(p,BUFFMAX);
 	int up_size;
+	struct iovec concat[4];
 
-	up_size = strlen(user) + strlen(pass);
+	up_size = strlen(user) + strlen(pass) + 2;
 	if (up_size > BUFFMAX - 1024) {
-		ap_log_rerror(APLOG_MARK, APLOG_ERR, 0, r, "User and pass length is over BUFFMAX=%i which is NOT allowed size=%i\n", BUFFMAX, up_size);
+		ap_log_rerror(APLOG_MARK, APLOG_ERR, 0, r, "Dovecot Authentication: User and pass length is over (or close) BUFFMAX=%i which is NOT allowed size=%i\n", BUFFMAX, up_size);
 		return 0;
 	}
-	char *user_pass = apr_pcalloc(p, up_size + 2);
-	strcat(&user_pass[1], user);
-	strcat(&user_pass[1 + strlen(user) + 1], pass);
-	encoded_user_pass = (char *)apr_pcalloc(p, apr_base64_encode_len(sizeof(user_pass) + 2));
-	apr_base64_encode(encoded_user_pass, user_pass, up_size + 2);
-	snprintf(data, BUFFMAX, "AUTH\t1\tPLAIN\tservice=apache\tnologin"	// local ip (lip) is hardcoded as we are
-		 "\tlip=127.0.0.1\trip=%s\tsecured\tresp=%s\n", remotehost, encoded_user_pass);	// connecting trough LOCAL unix socket anyway :)
+	char *user_pass = apr_pcalloc(p, up_size);
+	char * encoded_user_pass = (char *)apr_pcalloc(p, apr_base64_encode_len(sizeof(user_pass)));
+	// this beautifull code snippet from bellow (concat blah blah) is needed for use of apr_pstrcatv
+	// as without using apr_pstrcatv apr_pstrcat  will remove \0 which we need for creating base64 encoded user_pass combination...
+	concat[0].iov_base = (void *)"\0";
+	concat[0].iov_len = 1;
+	concat[1].iov_base = (void *)user;
+	concat[1].iov_len = strlen(user);
+	concat[2].iov_base = (void *)"\0";
+	concat[2].iov_len = 1;
+	concat[3].iov_base = (void *)pass;
+	concat[3].iov_len = strlen(pass);
+	user_pass = apr_pstrcatv(p, concat, 4, NULL);
+	apr_base64_encode(encoded_user_pass, user_pass, up_size);
+	data = apr_psprintf(p, "AUTH\t1\tPLAIN\tservice=apache\tnologin"	// local ip (lip) is hardcoded as we are using local unix socket anyway...
+		"\tlip=127.0.0.1\trip=%s\tsecured\tresp=%s\n", remotehost, encoded_user_pass);
 	if (send(sock, data, strlen(data), 0) > 0) {
 		return 1;
 	} else {

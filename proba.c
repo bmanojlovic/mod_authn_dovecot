@@ -12,12 +12,13 @@
 #include <errno.h>
 #include <glib/gbase64.h>
 
-main() {
+int main() {
   char *blah;
   
   blah = malloc(1 + strlen("virus") + 1 + strlen("proba"));
   memset(blah,0x0, 1 + strlen("virus") + 1 + strlen("proba"));
   strcat(&blah[1],"virus");
   strcat(&blah[1+strlen("virus")+1],"proba");
-  printf("%s\n", g_base64_encode(blah,  1 + strlen("virus") + 1 + strlen("proba")));
+  printf("%s\n", g_base64_encode((const guchar *)blah,  1 + strlen("virus") + 1 + strlen("proba")));
+  return 0;
 }
