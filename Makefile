@@ -12,4 +12,4 @@ apache_module:
 install: all
 	sudo /usr/sbin/apxs2 -i -a mod_authn_dovecot.la
 clean:
-	rm -rf .libs/ mod_authn_dovecot.la mod_authn_dovecot.lo mod_authn_dovecot.slo client proba mod_authn_dovecot.pidb
+	rm -rf .libs/ mod_authn_dovecot.la mod_authn_dovecot.lo mod_authn_dovecot.slo client proba apr_proba

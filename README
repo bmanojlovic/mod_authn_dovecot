@@ -31,3 +31,18 @@ Example configuration of apache2 server can be found in "example.conf" file
 in same directory. Currently there is possibility to chain it with other
 authentication mechanisms but that will/ should be discussed anyway.
 
+################################################################################
+<Directory "/srv/www/htdocs">
+	AuthType Basic
+	AuthName "My dovecot authenticated place"
+	AuthBasicProvider dovecot
+	AuthDovecotAuthSocket /var/run/dovecot/auth-client
+	AuthDovecotAuthoritative On
+	Require valid-user
+	Options Indexes FollowSymLinks
+	AllowOverride AuthConfig
+	Order allow,deny
+	Allow from all
+</Directory>
+################################################################################
+

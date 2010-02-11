@@ -138,7 +138,7 @@ static authn_status check_password(request_rec * r, const char *user, const char
 		perror("fcntl(F_SETFL)");
 	}
 	address.sun_family = AF_UNIX;
-	strncpy(address.sun_path, conf->dovecotauthsocket, strlen(conf->dovecotauthsocket));
+	strncpy(address.sun_path,conf->dovecotauthsocket, strlen(conf->dovecotauthsocket));
 	result = connect(auths, (struct sockaddr *)&address, sizeof address);
 	if (result) {
 		ap_log_rerror(APLOG_MARK, APLOG_ERR, 0, r, "Dovecot Authentication: could not connect to dovecot socket");
@@ -226,15 +226,20 @@ static authn_status check_password(request_rec * r, const char *user, const char
 							break;
 						}
 					}
-					//if (retval == -1) {
-					//      fprintf(stderr, "sock_readline returned -1...\n");
-					//      close(auths);
-					//      return DECLINED;
-					//}
+					if (retval == -1) {
+						ap_log_rerror(APLOG_MARK, APLOG_ERR, 0, r, "Dovecot Authentication: socket reading failed bailing out");
+						close(auths);
+						if (conf->authoritative == 0) {
+							return DECLINED;
+						} else {
+							return AUTH_USER_NOT_FOUND;
+						}
+					}
 				}
 			}
 		}
 	}
+	close(auths);
 	if (conf->authoritative == 0) {
 		return DECLINED;
 	} else {
@@ -278,12 +283,13 @@ int receive_data(apr_pool_t * p, request_rec * r, struct connection_state *cs, c
 	int ver_minor;
 	char *auth_method;
 	char *auth_protocol;
+	char *last;
 	if (strncmp("MECH", data, 4) == 0) {
-		strtok(data, "\t");
-		auth_method = strtok(NULL, "\t");
-		auth_protocol = strtok(NULL, "\t");
-		if (strncasecmp("PLAINTEXT", auth_protocol, 9) == 0) {
-			if (strncasecmp(AUTH_MECHANISM, auth_method, strlen(AUTH_MECHANISM)) == 0) {
+		apr_strtok(data, "\t", &last);
+		auth_method = apr_strtok(NULL, "\t", &last);
+		auth_protocol = apr_strtok(NULL, "\t", &last);
+		if (strncmp("PLAINTEXT", auth_protocol,9) == 0) {
+			if (strncmp(AUTH_MECHANISM, auth_method,strlen(AUTH_MECHANISM)) == 0) {
 				cs->mech_available = 1;
 			}
 		}
