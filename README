@@ -1,8 +1,9 @@
 Hello,
 
-	as dovecot can have many different backends and exposes itself as
- authentication source trough dovecot-auth client socket which example
- configuration can be found bellow
+	as dovecot can have many different authentication backends and exposes 
+ itself as authentication source trough dovecot-auth client socket (which example
+ configuration can be found bellow). This module enables you to authenticate
+ users against it using basic authentication.
 
 ################################################################################
   socket listen {
@@ -29,7 +30,7 @@ Hello,
 
 Example configuration of apache2 server can be found in "example.conf" file
 in same directory. Currently there is possibility to chain it with other
-authentication mechanisms but that will/ should be discussed anyway.
+authentication mechanisms but that will / should be discussed anyway.
 
 ################################################################################
 <Directory "/srv/www/htdocs">
