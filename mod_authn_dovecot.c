@@ -58,17 +58,20 @@ S:OK <TAB> 1 <TAB> user=johndoe  <NEWLINE>
 #include <sys/socket.h>
 #include <sys/un.h>
 
-#define AUTH_TIMEOUT 5
 #define BUFFMAX 8192
+// Supported version of dovecot auth protocol
 #define AUTH_PROTOCOL_MAJOR_VERSION 1
 #define AUTH_PROTOCOL_MINOR_VERSION 1
 #define AUTH_MECHANISM "PLAIN"
 
+// Apache configuration variables
 typedef struct {
 	char *dovecotauthsocket;
+	int dovecotauthtimeout;
 	int authoritative;
 } authn_dovecot_config_rec;
 
+// struct which defines current state of connection to dovecot auth socket
 struct connection_state {
 	int version_ok;
 	int mech_available;
@@ -88,6 +91,7 @@ static void *create_authn_dovecot_dir_config(apr_pool_t * p, char *d)
 	authn_dovecot_config_rec *conf = apr_pcalloc(p, sizeof(*conf));
 
 	conf->dovecotauthsocket = "/var/run/dovecot/auth-client";	/* just to illustrate the default really */
+	conf->dovecotauthtimeout = 5;
 	conf->authoritative = 1;	// by default we are authoritative
 	return conf;
 }
@@ -103,11 +107,17 @@ static const command_rec authn_dovecot_cmds[] = {
 		     OR_AUTHCFG,
 		     "Set to 'Off' to allow access control to be passed along to "
 		     "lower modules if the UserID is not known to this module. " "(default is On)."),
+	AP_INIT_TAKE1("AuthDovecotTimeout", ap_set_int_slot,
+		     (void *)APR_OFFSETOF(authn_dovecot_config_rec,
+					  dovecotauthtimeout),
+		     OR_AUTHCFG, "Timeout waiting for authorization in seconds"),
 	{NULL}
 };
 
 module AP_MODULE_DECLARE_DATA authn_dovecot_module;
 
+
+// main check password function which do real job of authentication against dovecot
 static authn_status check_password(request_rec * r, const char *user, const char *password)
 {
 	authn_dovecot_config_rec *conf = ap_get_module_config(r->per_dir_config,
@@ -121,6 +131,7 @@ static authn_status check_password(request_rec * r, const char *user, const char
 
 	apr_pool_create(&p, r->pool);	// create subpool for local functions, variables...
 
+	// setting default values for connection state 
 	cs.version_ok = 0;
 	cs.mech_available = 0;
 	cs.hshake_done = 0;
@@ -130,6 +141,7 @@ static authn_status check_password(request_rec * r, const char *user, const char
 	fd_set socks_r;
 	fd_set socks_w;
 	fd_set error_fd;
+	
 	char *line = apr_pcalloc(p, sizeof(char) * (BUFFMAX + 1));
 	auths = socket(AF_UNIX, SOCK_STREAM, 0);
 	opts = fcntl(auths, F_GETFL);
@@ -151,7 +163,9 @@ static authn_status check_password(request_rec * r, const char *user, const char
 	cnt = 0;
 
 	auth_in_progress = 0;
-	while (cnt < AUTH_TIMEOUT) {
+	// loop trough sockets for writability and for data on socket to read,
+	// wait untill authenticated or if timeoout occurs error out with AUTH_USER_NOT_FOUND and log it
+	while (cnt < conf->dovecotauthtimeout) {
 		fdmax = auths;	// simply this is only one really used socket so ...
 		tv.tv_sec = 1;
 		tv.tv_usec = 0;
@@ -173,7 +187,7 @@ static authn_status check_password(request_rec * r, const char *user, const char
 		}
 
 		if (readsocks == 0) {
-			cnt++;	// wait for timeout and count to AUTH_TIMEOUT
+			cnt++;	// wait for timeout and count to conf->dovecotauthtimeout
 			// only add to counter in case of timeout!
 			//fprintf(stderr, "%i ", cnt);
 			fflush(stdout);
@@ -210,12 +224,12 @@ static authn_status check_password(request_rec * r, const char *user, const char
 								}
 							}
 							if (cs.authenticated == 1) {
-								ap_log_rerror(APLOG_MARK, APLOG_DEBUG, 0, r, "Dovecot Authentication: Authenticated user=%s", user);
+								ap_log_rerror(APLOG_MARK, APLOG_DEBUG, 0, r, "Dovecot Authentication: Authenticated user=\"%s\"", user);
 								close(auths);
 								return AUTH_GRANTED;
 							}
 							if (cs.authenticated == -1) {
-								ap_log_rerror(APLOG_MARK, APLOG_ERR, 0, r, "Dovecot Authentication: Denied authentication for user=%s", user);
+								ap_log_rerror(APLOG_MARK, APLOG_ERR, 0, r, "Dovecot Authentication: Denied authentication for user=\"%s\"", user);
 								close(auths);
 								if (conf->authoritative == 0) {
 									return DECLINED;
@@ -240,6 +254,7 @@ static authn_status check_password(request_rec * r, const char *user, const char
 		}
 	}
 	close(auths);
+	ap_log_rerror(APLOG_MARK, APLOG_ERR, 0, r, "Dovecot Authentication Timeout");
 	if (conf->authoritative == 0) {
 		return DECLINED;
 	} else {
@@ -247,6 +262,9 @@ static authn_status check_password(request_rec * r, const char *user, const char
 	}
 }
 
+// helper function for reading from socket and converting single chars to line and return it
+// return -1 if recv is not possible so main function can error out in case of failure (for instance if dovecot-auth dies
+// in the middle of transaction)
 int sock_readline(apr_pool_t * p, request_rec * r, int sock, char *data)
 {
 	int i = 0;
@@ -266,6 +284,8 @@ int sock_readline(apr_pool_t * p, request_rec * r, int sock, char *data)
 	return i;
 }
 
+
+// helper function for sending dovecot authentication protocol handshake request
 int send_handshake(apr_pool_t * p, request_rec * r, int sock)
 {
 	char *handshake_data = apr_pcalloc(p, 100);
@@ -276,7 +296,8 @@ int send_handshake(apr_pool_t * p, request_rec * r, int sock)
 		return 0;
 	}
 }
-
+// helper function for receiving data and actual checking of response from auth sockets
+// returns state of connection trough connection_state struct
 int receive_data(apr_pool_t * p, request_rec * r, struct connection_state *cs, char *data)
 {
 	int ver_major;
@@ -318,6 +339,7 @@ int receive_data(apr_pool_t * p, request_rec * r, struct connection_state *cs, c
 	return 1;
 }
 
+// helper function used for sending prepared data to socket for authorization against dovecot auth
 int send_auth_request(apr_pool_t * p, request_rec * r, int sock, const char *user, const char *pass, char *remotehost)
 {
 	char *data=apr_pcalloc(p,BUFFMAX);

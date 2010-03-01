@@ -37,6 +37,7 @@ authentication mechanisms but that will/ should be discussed anyway.
 	AuthName "My dovecot authenticated place"
 	AuthBasicProvider dovecot
 	AuthDovecotAuthSocket /var/run/dovecot/auth-client
+	AuthDovecotTimeout 5
 	AuthDovecotAuthoritative On
 	Require valid-user
 	Options Indexes FollowSymLinks
