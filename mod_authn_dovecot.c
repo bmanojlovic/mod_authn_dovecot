@@ -218,7 +218,13 @@ static authn_status check_password(request_rec * r, const char *user, const char
 								} else {
 									if (auth_in_progress != 1) {
 										ap_log_rerror(APLOG_MARK, APLOG_DEBUG, 0, r, "Dovecot Authentication: Sending authentication request");
-										send_auth_request(p, r, i, user, password, r->connection->remote_ip);
+										send_auth_request(p, r, i, user, password,
+#if MODULE_MAGIC_NUMBER_MAJOR >= 20120211
+                                            r->connection->client_ip
+#else
+                                            r->connection->remote_ip
+#endif
+                                            );
 										auth_in_progress = 1;
 									}
 								}
@@ -382,6 +388,10 @@ static void register_hooks(apr_pool_t * p)
 {
 	ap_register_provider(p, AUTHN_PROVIDER_GROUP, "dovecot", "0", &authn_dovecot_provider);
 }
+
+#ifdef APLOG_USE_MODULE
+APLOG_USE_MODULE(authn_dovecot);
+#endif
 
 module AP_MODULE_DECLARE_DATA authn_dovecot_module = {
 	STANDARD20_MODULE_STUFF,

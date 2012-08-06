@@ -10,7 +10,7 @@
 #include <errno.h>
 
 // if used with lighttpd simplest solution is to use gbase64 implementation...
-#include <glib/gbase64.h>
+#include <glib.h>
 
 #define AUTH_TIMEOUT 5
 #define BUFFMAX 8192
