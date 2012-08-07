@@ -10,7 +10,7 @@
 #include <err.h>
 #include <stdlib.h>
 #include <errno.h>
-#include <glib/gbase64.h>
+#include <glib.h>
 
 int main() {
   char *blah;
