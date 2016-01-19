@@ -404,9 +404,10 @@ int send_auth_request(apr_pool_t * p, request_rec * r, int sock, const char *use
 	ap_assert(data != NULL);
 	size_t const d_size = strlen(data);
 	if (send(sock, data, d_size, 0) > 0) {
-		bzero(user_pass, up_size);
-		bzero(encoded_user_pass, eup_size);
-		bzero(data, d_size);
+		// scrub user credentials
+		memset(user_pass, '\0', up_size);
+		memset(encoded_user_pass, '\0', eup_size);
+		memset(data, '\0', d_size);
 		return 1;
 	} else {
 		return 0;
