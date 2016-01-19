@@ -78,6 +78,7 @@ struct connection_state {
 	int hshake_done;
 	int authenticated;
 	int handshake_sent;
+	char *user;
 };
 
 /* proto */
@@ -88,7 +89,8 @@ int send_auth_request(apr_pool_t * p, request_rec * r, int sock, const char *use
 
 static void *create_authn_dovecot_dir_config(apr_pool_t * p, char *d)
 {
-	authn_dovecot_config_rec *conf = apr_pcalloc(p, sizeof(*conf));
+	authn_dovecot_config_rec * const conf = apr_pcalloc(p, sizeof(*conf));
+	ap_assert(conf != NULL);
 
 	conf->dovecotauthsocket = "/var/run/dovecot/auth-client";	/* just to illustrate the default really */
 	conf->dovecotauthtimeout = 5;
@@ -137,12 +139,14 @@ static authn_status check_password(request_rec * r, const char *user, const char
 	cs.hshake_done = 0;
 	cs.authenticated = 0;	// by default user is NOT authenticated :)
 	cs.handshake_sent = 0;
+	cs.user = NULL;
 
 	fd_set socks_r;
 	fd_set socks_w;
 	fd_set error_fd;
 	
-	char *line = apr_pcalloc(p, sizeof(char) * (BUFFMAX + 1));
+	char * const line = apr_pcalloc(p, sizeof(char) * (BUFFMAX + 1));
+	ap_assert(line != NULL);
 	auths = socket(AF_UNIX, SOCK_STREAM, 0);
 	opts = fcntl(auths, F_GETFL);
 	opts = (opts | O_NONBLOCK);
@@ -232,6 +236,9 @@ static authn_status check_password(request_rec * r, const char *user, const char
 							if (cs.authenticated == 1) {
 								ap_log_rerror(APLOG_MARK, APLOG_DEBUG, 0, r, "Dovecot Authentication: Authenticated user=\"%s\"", user);
 								close(auths);
+								if (cs.user != NULL) {
+									r->user = cs.user;
+								}
 								return AUTH_GRANTED;
 							}
 							if (cs.authenticated == -1) {
@@ -294,8 +301,8 @@ int sock_readline(apr_pool_t * p, request_rec * r, int sock, char *data)
 // helper function for sending dovecot authentication protocol handshake request
 int send_handshake(apr_pool_t * p, request_rec * r, int sock)
 {
-	char *handshake_data = apr_pcalloc(p, 100);
-	handshake_data = apr_psprintf(p, "VERSION\t%u\t%u\n" "CPID\t%u\n", AUTH_PROTOCOL_MAJOR_VERSION, AUTH_PROTOCOL_MINOR_VERSION, (unsigned int)getpid());
+	char * const handshake_data = apr_psprintf(p, "VERSION\t%u\t%u\n" "CPID\t%u\n", AUTH_PROTOCOL_MAJOR_VERSION, AUTH_PROTOCOL_MINOR_VERSION, (unsigned int)getpid());
+	ap_assert(handshake_data != NULL);
 	if (send(sock, handshake_data, strlen(handshake_data), 0) > 0) {
 		return 1;
 	} else {
@@ -308,6 +315,9 @@ int receive_data(apr_pool_t * p, request_rec * r, struct connection_state *cs, c
 {
 	int ver_major;
 	int ver_minor;
+	size_t length;
+	char *user;
+	char *next;
 	char *auth_method;
 	char *auth_protocol;
 	char *last;
@@ -340,6 +350,24 @@ int receive_data(apr_pool_t * p, request_rec * r, struct connection_state *cs, c
 
 	if (strncmp("OK", data, 2) == 0) {
 		cs->authenticated = 1;
+		apr_strtok(data, "\t", &last);
+		apr_strtok(NULL, "\t", &last);
+		user = apr_strtok(NULL, "\t", &last); /* "OK" */
+		next = apr_strtok(NULL, "\t", &last); /* "1" */
+		if (user != NULL &&
+			(next == NULL || (next - user) >
+				(1 /* separator */ + 5 /* user= */)) &&
+			strncmp("user=", user, 5) == 0
+		) {
+			if (next != NULL) {
+				length = next - &(user[5]);
+			} else {
+				length = strnlen(&(user[5]), BUFFMAX) + 1;
+			}
+			if ((cs->user = apr_palloc(p, length)) != NULL) {
+				apr_cpystrn(cs->user, &(user[5]), length);
+			}
+		}
 		return 1;
 	}
 	return 1;
@@ -348,17 +376,16 @@ int receive_data(apr_pool_t * p, request_rec * r, struct connection_state *cs, c
 // helper function used for sending prepared data to socket for authorization against dovecot auth
 int send_auth_request(apr_pool_t * p, request_rec * r, int sock, const char *user, const char *pass, char *remotehost)
 {
-	char *data=apr_pcalloc(p,BUFFMAX);
-	int up_size;
 	struct iovec concat[4];
 
-	up_size = strlen(user) + strlen(pass) + 2;
+	size_t const up_size = strlen(user) + strlen(pass) + 2;
 	if (up_size > BUFFMAX - 1024) {
-		ap_log_rerror(APLOG_MARK, APLOG_ERR, 0, r, "Dovecot Authentication: User and pass length is over (or close) BUFFMAX=%i which is NOT allowed size=%i\n", BUFFMAX, up_size);
+		ap_log_rerror(APLOG_MARK, APLOG_ERR, 0, r, "Dovecot Authentication: User and pass length is over (or close) BUFFMAX=%i which is NOT allowed size=%u\n", BUFFMAX, (unsigned int)up_size);
 		return 0;
 	}
-	char *user_pass = apr_pcalloc(p, up_size);
-	char * encoded_user_pass = (char *)apr_pcalloc(p, apr_base64_encode_len(sizeof(user_pass)));
+	size_t const eup_size = apr_base64_encode_len(up_size);
+	char * const encoded_user_pass = (char *)apr_palloc(p, sizeof(char) * eup_size);
+	ap_assert(encoded_user_pass != NULL);
 	// this beautifull code snippet from bellow (concat blah blah) is needed for use of apr_pstrcatv
 	// as without using apr_pstrcatv apr_pstrcat  will remove \0 which we need for creating base64 encoded user_pass combination...
 	concat[0].iov_base = (void *)"\0";
@@ -369,11 +396,18 @@ int send_auth_request(apr_pool_t * p, request_rec * r, int sock, const char *use
 	concat[2].iov_len = 1;
 	concat[3].iov_base = (void *)pass;
 	concat[3].iov_len = strlen(pass);
-	user_pass = apr_pstrcatv(p, concat, 4, NULL);
+	char * const user_pass = apr_pstrcatv(p, concat, 4, NULL);
+	ap_assert(user_pass != NULL);
 	apr_base64_encode(encoded_user_pass, user_pass, up_size);
-	data = apr_psprintf(p, "AUTH\t1\tPLAIN\tservice=apache\tnologin"	// local ip (lip) is hardcoded as we are using local unix socket anyway...
+	char * const data = apr_psprintf(p, "AUTH\t1\tPLAIN\tservice=apache\tnologin"	// local ip (lip) is hardcoded as we are using local unix socket anyway...
 		"\tlip=127.0.0.1\trip=%s\tsecured\tresp=%s\n", remotehost, encoded_user_pass);
-	if (send(sock, data, strlen(data), 0) > 0) {
+	ap_assert(data != NULL);
+	size_t const d_size = strlen(data);
+	if (send(sock, data, d_size, 0) > 0) {
+		// scrub user credentials
+		memset(user_pass, '\0', up_size);
+		memset(encoded_user_pass, '\0', eup_size);
+		memset(data, '\0', d_size);
 		return 1;
 	} else {
 		return 0;
