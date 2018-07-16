@@ -27,6 +27,7 @@
 
 #include <unistd.h>
 #include <stdio.h>
+#include <string.h>
 
 #include "apr_base64.h"		// base64 encode
 
@@ -157,7 +158,7 @@ static authn_status check_password(request_rec * r, const char *user, const char
 	strncpy(address.sun_path,conf->dovecotauthsocket, strlen(conf->dovecotauthsocket));
 	result = connect(auths, (struct sockaddr *)&address, sizeof address);
 	if (result) {
-		ap_log_rerror(APLOG_MARK, APLOG_ERR, 0, r, "Dovecot Authentication: could not connect to dovecot socket");
+		ap_log_rerror(APLOG_MARK, APLOG_ERR, 0, r, "Dovecot Authentication: could not connect to dovecot socket %s: %s", address.sun_path, strerror(errno));
 		if (conf->authoritative == 0) {
 			return DECLINED;
 		} else {
@@ -186,7 +187,7 @@ static authn_status check_password(request_rec * r, const char *user, const char
 
 		readsocks = select(fdmax + 1, &socks_r, &socks_w, NULL, &tv);
 		if (readsocks < 0) {
-			ap_log_rerror(APLOG_MARK, APLOG_ERR, 0, r, "Dovecot Authentication: socket select");
+			ap_log_rerror(APLOG_MARK, APLOG_ERR, 0, r, "Dovecot Authentication: socket select: %s", strerror(errno));
 			return DECLINED;
 		}
 
