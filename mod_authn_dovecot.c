@@ -25,6 +25,7 @@
 #include "http_request.h"
 #include "mod_auth.h"
 
+#include <errno.h>
 #include <unistd.h>
 #include <stdio.h>
 #include <string.h>
@@ -170,7 +171,7 @@ static authn_status check_password(request_rec * r, const char *user, const char
 	address.sun_family = AF_UNIX;
 	memcpy(address.sun_path, conf->dovecotauthsocket, authsocklen + 1);
 	result = connect(auths, (struct sockaddr *)&address, sizeof address);
-	if (result) {
+	if (result && errno != EINPROGRESS) {
 		ap_log_rerror(APLOG_MARK, APLOG_ERR, 0, r, "Dovecot Authentication: could not connect to dovecot socket %s: %s", address.sun_path, strerror(errno));
 		if (conf->authoritative == 0) {
 			return DECLINED;
