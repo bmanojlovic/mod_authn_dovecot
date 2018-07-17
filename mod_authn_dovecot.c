@@ -132,6 +132,19 @@ static authn_status check_password(request_rec * r, const char *user, const char
 	struct timeval tv;
 	struct connection_state cs;
 
+	size_t authsocklen = strlen(conf->dovecotauthsocket);
+	if (authsocklen >= sizeof address.sun_path) {
+		// Note: Some OS support longer sun_path via the "struct hack".
+		// Not Linux.  See:
+		// https://mail-index.netbsd.org/tech-net/2006/10/11/0008.html
+		ap_log_rerror(APLOG_MARK, APLOG_ERR, 0, r, "Dovecot Authentication: dovecot socket path %s is too long.", conf->dovecotauthsocket);
+		if (conf->authoritative == 0) {
+			return DECLINED;
+		} else {
+			return AUTH_USER_NOT_FOUND;
+		}
+	}
+
 	apr_pool_create(&p, r->pool);	// create subpool for local functions, variables...
 
 	// setting default values for connection state 
@@ -155,7 +168,7 @@ static authn_status check_password(request_rec * r, const char *user, const char
 		perror("fcntl(F_SETFL)");
 	}
 	address.sun_family = AF_UNIX;
-	strncpy(address.sun_path,conf->dovecotauthsocket, strlen(conf->dovecotauthsocket));
+	memcpy(address.sun_path, conf->dovecotauthsocket, authsocklen + 1);
 	result = connect(auths, (struct sockaddr *)&address, sizeof address);
 	if (result) {
 		ap_log_rerror(APLOG_MARK, APLOG_ERR, 0, r, "Dovecot Authentication: could not connect to dovecot socket %s: %s", address.sun_path, strerror(errno));
