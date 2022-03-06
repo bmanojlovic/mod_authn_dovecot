@@ -367,7 +367,7 @@ int receive_data(apr_pool_t * p, request_rec * r, struct connection_state *cs, c
 		cs->authenticated = 1;
 		apr_strtok(data, "\t", &last);
 		apr_strtok(NULL, "\t", &last);
-		user = apr_strtok(NULL, "\t", &last); /* "OK" */
+		user = apr_strtok(NULL, "\n", &last); /* "OK" */
 		next = apr_strtok(NULL, "\t", &last); /* "1" */
 		if (user != NULL &&
 			(next == NULL || (next - user) >
